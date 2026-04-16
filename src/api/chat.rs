@@ -6,7 +6,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
 
 use crate::api::router::AppState;
-use crate::engine::session::{self, Message, SessionEvent};
+use crate::engine::{session, Message, SessionEvent};
 
 #[derive(Deserialize)]
 pub struct ChatRequest {

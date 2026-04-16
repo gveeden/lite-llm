@@ -61,7 +61,7 @@ cd LiteRT-LM
 bazel build \
   --config=linux \
   --jobs=$(nproc) \
-  //litert_lm:libengine.so
+  //c:libengine.so
 ```
 
 This takes 20–40 minutes on a Pi 4. A Pi 5 is noticeably faster.
@@ -103,7 +103,7 @@ cd LiteRT-LM
 bazel build \
   --config=linux \
   --jobs=$(nproc) \
-  //litert_lm:libengine.so
+  //c:libengine.so
 ```
 
 ### 4. Copy output
@@ -114,6 +114,142 @@ cp bazel-bin/litert_lm/libengine.so ~/system/litert-lm-libs/
 find bazel-bin -name '*.so' -not -path '*/\.*' \
   | xargs -I{} cp {} ~/system/litert-lm-libs/ 2>/dev/null || true
 ```
+
+---
+
+## GPU build on Asahi Linux (Honeykrisp / Vulkan)
+
+The upstream LiteRT-LM BUILD files have GPU stubs that are intentionally empty. This section documents how to patch them to enable GPU acceleration via the LiteRT OpenCL delegate, which on Asahi runs through Mesa's rusticl → Honeykrisp Vulkan → Apple GPU.
+
+> **Status:** experimental. Confirmed working on Apple M1 Max (OpenCL 3.0 via Mesa rusticl + Honeykrisp). Inference falls back to CPU if OpenCL device initialisation fails at runtime.
+
+### How it works
+
+```
+LiteRT GPU delegate → OpenCL API → Mesa rusticl → Honeykrisp Vulkan driver → Apple GPU
+```
+
+The LiteRT GPU delegate uses OpenCL on Linux. On Asahi, Mesa's rusticl implements OpenCL on top of the Vulkan driver, so Honeykrisp still does the compute.
+
+### 1. Install system dependencies
+
+```bash
+sudo pacman -S opencl-icd-loader ocl-icd-loader opencl-clhpp-headers clinfo
+```
+
+or 
+
+```bash
+# ICD loader, headers, and the Mesa rusticl OpenCL implementation
+sudo dnf install OpenCL-ICD-Loader opencl-headers clinfo mesa-libOpenCL
+```
+
+Verify Mesa exposes an OpenCL device for the Apple GPU:
+
+```bash
+RUSTICL_ENABLE=asahi clinfo | grep -E 'Device Name|OpenCL C'
+```
+
+You should see the Apple GPU listed. If it shows nothing, check that `mesa-libOpenCL` is installed (`dnf list installed mesa-libOpenCL`) and that `/etc/OpenCL/vendors/` contains an ICD file pointing to the Mesa rusticl library.
+
+### 2. Patch the LiteRT-LM BUILD files
+
+These two targets are empty stubs in the upstream repo. Fill them in:
+
+**`runtime/executor/BUILD`** — find `default_static_gpu_accelerator` and replace:
+
+```python
+# Before:
+cc_library(
+    name = "default_static_gpu_accelerator",
+    deps = select({
+        "@litert//litert:litert_link_capi_so": [],
+        "//conditions:default": [],
+    }) + select({
+        "//conditions:default": [],
+    }),
+)
+
+# After:
+cc_library(
+    name = "default_static_gpu_accelerator",
+    deps = select({
+        "@litert//litert:litert_link_capi_so": [],
+        "//conditions:default": [
+            "@litert//tflite/delegates/gpu:delegate",
+        ],
+    }),
+)
+```
+
+**`runtime/components/BUILD`** — find `default_static_gpu_samplers` and replace:
+
+```python
+# Before:
+cc_library(
+    name = "default_static_gpu_samplers",
+    deps = select({
+        "@litert//litert:litert_link_capi_so": [],
+        "//conditions:default": [],
+    }) + select({
+        "//conditions:default": [],
+    }),
+)
+
+# After:
+cc_library(
+    name = "default_static_gpu_samplers",
+    deps = select({
+        "@litert//litert:litert_link_capi_so": [],
+        "//conditions:default": [
+            "@litert//tflite/delegates/gpu:delegate",
+        ],
+    }),
+)
+```
+
+### 3. Build with OpenCL / no-GL flags
+
+The GPU delegate on Linux needs `CL_DELEGATE_NO_GL` to avoid pulling in EGL/OpenGL display dependencies (there is no display server requirement for inference):
+
+```bash
+bazel build \
+  --config=linux \
+  --jobs=$(nproc) \
+  --copt=-DCL_DELEGATE_NO_GL \
+  --copt=-DTFLITE_GPU_BINARY_RELEASE \
+  //c:libengine.so
+```
+
+`TFLITE_GPU_BINARY_RELEASE` trims some debug/testing deps that can cause link issues outside Google's internal build environment.
+
+### 4. Copy output and set up the runtime environment
+
+```bash
+mkdir -p ~/system/litert-lm-libs
+cp bazel-bin/litert_lm/libengine.so ~/system/litert-lm-libs/
+find bazel-bin -name '*.so' -not -path '*/\.*' \
+  | xargs -I{} cp {} ~/system/litert-lm-libs/ 2>/dev/null || true
+```
+
+At runtime, rusticl needs to know to expose the Asahi GPU as an OpenCL device:
+
+```bash
+export RUSTICL_ENABLE=asahi
+./lite-llm
+```
+
+Or add it to your `~/.config/lite-llm/env` or a systemd unit `Environment=` line.
+
+### 5. Verify GPU is being used
+
+If the GPU delegate initialises successfully you will see a log line like:
+
+```
+Created OpenCL-based gpu delegate
+```
+
+in stderr at startup. If it falls back to CPU you will see nothing or a warning about OpenCL device not found — inference still works, just CPU-only.
 
 ---
 

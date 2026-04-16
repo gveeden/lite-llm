@@ -2,8 +2,8 @@
 port = 8080
 host = "127.0.0.1"
 
-# [model]
-# path = "/path/to/model.task"
+[model]
+path = "unsloth/gemma-4-E2B-it-GGUF"
 
 [db]
 path = "~/.local/share/lite-llm/lite-llm.db"

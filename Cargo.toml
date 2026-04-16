@@ -26,3 +26,6 @@ toml = "0.8"
 shellexpand = "3.1"
 hf-hub = { version = "0.3", features = ["tokio"] }
 minijinja = "2"
+llama-cpp-2 = { version = "0.1", features = ["vulkan"] }
+encoding_rs = "0.8"
+once_cell = "1"

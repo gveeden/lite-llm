@@ -35,7 +35,10 @@ impl Engine {
                 std::ptr::null(),
                 std::ptr::null(),
             );
-            anyhow::ensure!(!settings.is_null(), "litert_lm_engine_settings_create failed");
+            anyhow::ensure!(
+                !settings.is_null(),
+                "litert_lm_engine_settings_create failed"
+            );
 
             let engine = litert_lm_engine_create(settings);
             if engine.is_null() {
@@ -43,7 +46,10 @@ impl Engine {
                 anyhow::bail!("litert_lm_engine_create failed");
             }
 
-            Ok(Engine { raw: engine, settings })
+            Ok(Engine {
+                raw: engine,
+                settings,
+            })
         }
     }
 }
@@ -97,7 +103,10 @@ impl Conversation {
                 msgs_ptr,
                 constrained_decoding,
             );
-            anyhow::ensure!(!config.is_null(), "litert_lm_conversation_config_create failed");
+            anyhow::ensure!(
+                !config.is_null(),
+                "litert_lm_conversation_config_create failed"
+            );
 
             let conv = litert_lm_conversation_create(engine.raw, config);
             litert_lm_conversation_config_delete(config);
@@ -113,12 +122,12 @@ impl Conversation {
     pub fn send_message(&self, message_json: &str) -> anyhow::Result<String> {
         let msg = CString::new(message_json)?;
         unsafe {
-            let resp = litert_lm_conversation_send_message(
-                self.raw,
-                msg.as_ptr(),
-                std::ptr::null(),
+            let resp =
+                litert_lm_conversation_send_message(self.raw, msg.as_ptr(), std::ptr::null());
+            anyhow::ensure!(
+                !resp.is_null(),
+                "litert_lm_conversation_send_message failed"
             );
-            anyhow::ensure!(!resp.is_null(), "litert_lm_conversation_send_message failed");
             let s = CStr::from_ptr(litert_lm_json_response_get_string(resp))
                 .to_string_lossy()
                 .into_owned();
@@ -149,7 +158,10 @@ impl Conversation {
                 userdata,
             )
         };
-        anyhow::ensure!(rc == 0, "litert_lm_conversation_send_message_stream failed: {rc}");
+        anyhow::ensure!(
+            rc == 0,
+            "litert_lm_conversation_send_message_stream failed: {rc}"
+        );
         Ok(())
     }
 
@@ -194,7 +206,11 @@ unsafe extern "C" fn stream_callback(
         Some(CStr::from_ptr(error_msg).to_string_lossy().into_owned())
     };
 
-    let _ = tx.send(StreamChunk { text, is_final, error });
+    let _ = tx.send(StreamChunk {
+        text,
+        is_final,
+        error,
+    });
 
     if is_final {
         // Reclaim the box so the sender is dropped.
