@@ -12,8 +12,11 @@ use crate::engine::{session, SessionEvent};
 pub struct CommandRequest {
     pub model: Option<String>,
     pub text: String,
-    #[serde(default)]
-    pub tools: Vec<String>,
+    /// Tool names to enable.
+    /// - Omitted or `null`: all registered tools (default)
+    /// - `[]`: no tools
+    /// - `["name", ...]`: only the named tools
+    pub tools: Option<Vec<String>>,
 }
 
 pub async fn command(
@@ -25,10 +28,10 @@ pub async fn command(
         .resolve(req.model.as_deref())
         .ok_or_else(|| "No model loaded".to_string())?;
 
-    let tools = if req.tools.is_empty() {
-        state.tools.all()
-    } else {
-        state.tools.by_names(&req.tools)
+    let tools = match req.tools {
+        None => state.tools.all(),
+        Some(ref names) if names.is_empty() => vec![],
+        Some(ref names) => state.tools.by_names(names),
     };
 
     let (tx, rx) = mpsc::unbounded_channel::<SessionEvent>();

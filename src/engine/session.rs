@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::tools::{executor, ToolDefinition};
+use crate::tools::{executor, ResponseMode, ToolDefinition};
 
 use super::{
     BackendResponse, DeltaEvent, DoneEvent, IncomingMessage, Message, ModelBackend, SessionEvent,
@@ -24,8 +24,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let t_e2e = std::time::Instant::now();
 
-    let system = build_system_message();
-    let mut conv = backend.new_conversation(Some(&system), &tools, &history)?;
+    let mut conv = backend.new_conversation(Some(build_system_message()), &tools, &history)?;
 
     let mut tool_executions: Vec<ToolExecution> = Vec::new();
     const MAX_TOOL_TURNS: usize = 10;
@@ -102,10 +101,35 @@ pub async fn run(
                     result: result.clone(),
                 });
 
-                next_msg = Some(IncomingMessage::ToolResult {
-                    tool_name: name,
-                    result,
-                });
+                let is_error = result.starts_with("error:");
+                let mode = if is_error {
+                    &tool.response.on_error
+                } else {
+                    &tool.response.on_success
+                };
+
+                match mode {
+                    ResponseMode::Direct => {
+                        // Stream the raw result straight to the client.
+                        tracing::info!(e2e_ms = t_e2e.elapsed().as_millis(), "session e2e");
+                        let _ = tx.send(SessionEvent::Delta(DeltaEvent {
+                            delta: result,
+                            done: false,
+                        }));
+                        let _ = tx.send(SessionEvent::Done(DoneEvent {
+                            delta: String::new(),
+                            done: true,
+                            tool_executions,
+                        }));
+                        return Ok(());
+                    }
+                    ResponseMode::Llm => {
+                        next_msg = Some(IncomingMessage::ToolResult {
+                            tool_name: name,
+                            result,
+                        });
+                    }
+                }
             }
         }
     }
@@ -113,15 +137,8 @@ pub async fn run(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn build_system_message() -> String {
-    let now = chrono::Local::now();
-    format!(
-        "You are a helpful assistant. \
-        The current date is {} and the current time is {} {}. \
-        Always use these values when the user asks what day, date, or time it is. \
-        Do not say you lack access to real-time information — you have been given the current date and time above.",
-        now.format("%A, %B %-d, %Y"),
-        now.format("%H:%M"),
-        now.format("%Z"),
-    )
+fn build_system_message() -> &'static str {
+    "You are a helpful assistant. \
+     Use the get_datetime tool whenever the user asks for the current date or time. \
+     After every tool call, always reply to the user with a short text message summarising the result."
 }

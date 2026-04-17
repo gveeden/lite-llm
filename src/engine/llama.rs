@@ -1,5 +1,5 @@
 use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -11,8 +11,8 @@ use llama_cpp_2::sampling::LlamaSampler;
 use once_cell::sync::OnceCell;
 use serde_json::Value;
 
-use crate::tools::ToolDefinition;
 use super::{BackendResponse, ConversationHandle, IncomingMessage, Message, ModelBackend};
+use crate::tools::ToolDefinition;
 
 // ── Global backend (llama_backend_init can only be called once per process) ───
 
@@ -24,10 +24,32 @@ fn get_or_init_backend() -> anyhow::Result<&'static LlamaBackend> {
         .map_err(|e| anyhow::anyhow!("Failed to initialise llama backend: {e}"))
 }
 
+// ── Shared context pool ───────────────────────────────────────────────────────
+//
+// LlamaContext wraps a raw C pointer that is not auto-Send/Sync.  We guarantee
+// exclusive access via Mutex, so both impls are safe.
+//
+// `cached_tokens` tracks which tokens are currently valid in the KV cache so
+// that successive requests sharing a common prompt prefix can skip re-evaluating
+// those tokens and only decode the delta.
+struct ContextState {
+    ctx: llama_cpp_2::context::LlamaContext<'static>,
+    cached_tokens: Vec<llama_cpp_2::token::LlamaToken>,
+}
+
+struct ContextPool(Mutex<ContextState>);
+unsafe impl Send for ContextPool {}
+unsafe impl Sync for ContextPool {}
+
 // ── Backend ───────────────────────────────────────────────────────────────────
 
 pub struct LlamaModelBackend {
-    model: Arc<LlamaModel>,
+    model: &'static LlamaModel,
+    // The inference context is created once at load time and shared across
+    // all conversations via a Mutex.  This matches how llama-server pre-allocates
+    // slots: context creation (KV-cache allocation) is expensive and should not
+    // happen per-request.
+    pool: Arc<ContextPool>,
 }
 
 impl LlamaModelBackend {
@@ -46,9 +68,29 @@ impl LlamaModelBackend {
         let model = LlamaModel::load_from_file(backend, path, &model_params)
             .map_err(|e| anyhow::anyhow!("Failed to load llama model '{path}': {e}"))?;
 
-        tracing::info!("Loaded llama model: {path} (n_gpu_layers={n_gpu})");
+        // Leak the model so we can hold &'static refs (needed for LlamaContext<'static>).
+        // The model lives for the process lifetime — the leak is intentional.
+        let model: &'static LlamaModel = Box::leak(Box::new(model));
+
+        // Create the inference context once here.
+        // n_batch = n_ctx so the full prompt always fits in a single decode call.
+        // 1 = LLAMA_FLASH_ATTN_TYPE_ENABLED  (matches --flash-attn on)
+        let n_ctx = 8192u32;
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(n_ctx))
+            .with_n_batch(n_ctx)
+            .with_flash_attention_policy(1);
+        let context = model
+            .new_context(backend, ctx_params)
+            .map_err(|e| anyhow::anyhow!("new_context: {e}"))?;
+
+        tracing::info!("Loaded llama model: {path} (n_gpu_layers={n_gpu}, n_ctx={n_ctx})");
         Ok(LlamaModelBackend {
-            model: Arc::new(model),
+            model,
+            pool: Arc::new(ContextPool(Mutex::new(ContextState {
+                ctx: context,
+                cached_tokens: Vec::new(),
+            }))),
         })
     }
 }
@@ -77,7 +119,8 @@ impl ModelBackend for LlamaModelBackend {
         }
 
         Ok(Box::new(LlamaConversation {
-            model: Arc::clone(&self.model),
+            model: self.model,
+            pool: Arc::clone(&self.pool),
             messages,
             tools_json,
         }))
@@ -86,8 +129,13 @@ impl ModelBackend for LlamaModelBackend {
 
 // ── Conversation handle ───────────────────────────────────────────────────────
 
+// ContextPool's Mutex guarantees exclusive access; safe to send across threads.
+unsafe impl Send for LlamaConversation {}
+
 struct LlamaConversation {
-    model: Arc<LlamaModel>,
+    model: &'static LlamaModel,
+    /// Shared inference context (one per model, serialised via Mutex).
+    pool: Arc<ContextPool>,
     /// Accumulated history as OAI-format message objects.
     messages: Vec<Value>,
     /// OpenAI-format tools JSON array, if tools are active.
@@ -105,7 +153,8 @@ impl ConversationHandle for LlamaConversation {
         // 1. Append incoming message to history.
         match msg {
             IncomingMessage::User(text) => {
-                self.messages.push(serde_json::json!({"role": "user", "content": text}));
+                self.messages
+                    .push(serde_json::json!({"role": "user", "content": text}));
             }
             IncomingMessage::ToolResult { tool_name, result } => {
                 // Include the tool name so the chat template can associate this
@@ -117,19 +166,21 @@ impl ConversationHandle for LlamaConversation {
                 }));
             }
         }
+        let t_after_msg = t_start.elapsed();
 
         // 2. Serialise accumulated history for the OAI-compat template API.
         let messages_json = serde_json::to_string(&self.messages)?;
+        let t_after_serialize = t_start.elapsed();
 
         // 3. Format prompt via the model's embedded chat template.
         //    enable_thinking=false suppresses Gemma 4's chain-of-thought block.
         //    strip_thinking_block() below is kept as a safety net for models that
         //    still emit empty thought tags even when thinking is disabled.
-        let backend = get_or_init_backend()?;
         let template: LlamaChatTemplate = self
             .model
             .chat_template(None)
             .map_err(|e| anyhow::anyhow!("chat_template: {e}"))?;
+        let t_after_get_template = t_start.elapsed();
 
         let params = OpenAIChatTemplateParams {
             messages_json: &messages_json,
@@ -137,7 +188,7 @@ impl ConversationHandle for LlamaConversation {
             tool_choice: None,
             json_schema: None,
             grammar: None,
-            reasoning_format: None,
+            reasoning_format: Some("none"),
             chat_template_kwargs: None,
             add_generation_prompt: true,
             use_jinja: true,
@@ -152,6 +203,7 @@ impl ConversationHandle for LlamaConversation {
             .model
             .apply_chat_template_oaicompat(&template, &params)
             .map_err(|e| anyhow::anyhow!("apply_chat_template: {e}"))?;
+        let t_after_apply_template = t_start.elapsed();
 
         let prompt = &template_result.prompt;
         tracing::debug!(chars = prompt.len(), "→ llama prompt");
@@ -171,36 +223,82 @@ impl ConversationHandle for LlamaConversation {
             .model
             .str_to_token(prompt, AddBos::Always)
             .map_err(|e| anyhow::anyhow!("tokenise: {e}"))?;
+        let t_after_tokenize = t_start.elapsed();
 
         let n_prompt = tokens.len();
         anyhow::ensure!(n_prompt > 0, "Empty prompt after tokenisation");
 
-        // 5. Create a fresh inference context.
-        //    Context is recreated per send() to avoid KV-cache lifetime issues.
-        //    For a local single-user server this is acceptable; the model is small
-        //    and re-evaluation of the full conversation is fast.
+        // 5. Evaluate only the tokens that aren't already in the KV cache.
         //
-        //    Note: default n_batch is 512. If n_prompt > 512 the decode call will
-        //    fail. For longer conversations consider setting a larger n_batch via
-        //    LlamaContextParams.
-        let ctx_params = LlamaContextParams::default()
-            .with_n_ctx(NonZeroU32::new(8192));
-        let mut ctx = self
-            .model
-            .new_context(backend, ctx_params)
-            .map_err(|e| anyhow::anyhow!("new_context: {e}"))?;
+        //    We track which tokens were last written into the context and find
+        //    the longest common prefix with the current prompt.  Only the
+        //    suffix beyond that prefix needs decoding.  This matches the
+        //    llama-server "context checkpoint" strategy and eliminates the
+        //    dominant cost on warm requests where the system-prompt + tool
+        //    definitions haven't changed.
+        let mut state = self.pool.0.lock().unwrap();
+        let t_after_lock = t_start.elapsed();
 
-        // 6. Decode the prompt batch (request logits only at the last position).
-        let mut batch = LlamaBatch::new(n_prompt, 1);
-        for (i, &tok) in tokens.iter().enumerate() {
+        let n_common = tokens
+            .iter()
+            .zip(state.cached_tokens.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+
+        // Determine the starting position for the decode batch.
+        //
+        // When every prompt token is already cached (n_common == n_prompt) the
+        // logit buffer still holds output from the PREVIOUS request's last
+        // generated token, which is wrong.  We evict just the last prompt
+        // position and re-decode it (1 token) so the sampler sees the correct
+        // next-token distribution.
+        //
+        // Generated tokens from the previous turn are always stripped after
+        // generation (see below), so the KV is clean from n_cached_end onwards.
+        let decode_from = if n_common == n_prompt && n_prompt > 0 {
+            let last = n_prompt - 1;
+            state
+                .ctx
+                .clear_kv_cache_seq(Some(0), Some(last as u32), None)
+                .map_err(|e| anyhow::anyhow!("clear_kv_cache_seq(last): {e}"))?;
+            last
+        } else {
+            // Clear everything from n_common onwards (overwrites old tail +
+            // any generated tokens left from the previous turn).
+            if n_common == 0 {
+                state.ctx.clear_kv_cache();
+            } else {
+                state
+                    .ctx
+                    .clear_kv_cache_seq(Some(0), Some(n_common as u32), None)
+                    .map_err(|e| anyhow::anyhow!("clear_kv_cache_seq: {e}"))?;
+            }
+            n_common
+        };
+        let t_after_kv_clear = t_start.elapsed();
+
+        let n_new_prompt = n_prompt - n_common; // tokens charged to this turn (for stats)
+        let n_to_decode = n_prompt - decode_from; // tokens actually sent to the GPU
+        let mut batch = LlamaBatch::new(n_to_decode, 1);
+        for (i, &tok) in tokens[decode_from..].iter().enumerate() {
+            let pos = (decode_from + i) as i32;
+            let is_last = i == n_to_decode - 1;
             batch
-                .add(tok, i as i32, &[0], i == n_prompt - 1)
+                .add(tok, pos, &[0], is_last)
                 .map_err(|e| anyhow::anyhow!("batch.add: {e}"))?;
         }
-        ctx.decode(&mut batch)
-            .map_err(|e| anyhow::anyhow!("decode(prompt): {e}"))?;
+        let t_after_batch_build = t_start.elapsed();
 
-        // 7. Autoregressive token sampling.
+        state
+            .ctx
+            .decode(&mut batch)
+            .map_err(|e| anyhow::anyhow!("decode(prompt): {e}"))?;
+        let t_after_prompt_decode = t_start.elapsed();
+
+        // Record the prompt tokens as the new cache state.
+        state.cached_tokens = tokens.clone();
+
+        // 6. Autoregressive token sampling.
         let mut sampler = LlamaSampler::chain([LlamaSampler::greedy()], false);
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut output = String::new();
@@ -210,7 +308,7 @@ impl ConversationHandle for LlamaConversation {
 
         loop {
             // -1 means "sample from the last position's logits".
-            let token = sampler.sample(&ctx, -1);
+            let token = sampler.sample(&state.ctx, -1);
             sampler.accept(token);
 
             if self.model.is_eog_token(token) {
@@ -242,8 +340,8 @@ impl ConversationHandle for LlamaConversation {
             // in a tool call and suppress all deltas for this turn.
             if let Some(tx) = delta_tx {
                 let trimmed = output.trim_start();
-                let is_tool_call = trimmed.starts_with("<|tool_call>")
-                    || trimmed.starts_with("<tool_call>");
+                let is_tool_call =
+                    trimmed.starts_with("<|tool_call>") || trimmed.starts_with("<tool_call>");
                 if !is_tool_call {
                     let _ = tx.send(piece.clone());
                 }
@@ -259,21 +357,50 @@ impl ConversationHandle for LlamaConversation {
             batch
                 .add(token, (n_prompt + n_new - 1) as i32, &[0], true)
                 .map_err(|e| anyhow::anyhow!("batch.add: {e}"))?;
-            ctx.decode(&mut batch)
+            state
+                .ctx
+                .decode(&mut batch)
                 .map_err(|e| anyhow::anyhow!("decode(token): {e}"))?;
+        }
+
+        // Strip generated tokens from the KV cache so subsequent send() calls
+        // (tool-result turns or next-request prefix matching) always start from
+        // a clean n_prompt boundary.  Generated positions don't survive across
+        // turns because the chat template re-encodes them differently in history.
+        if n_new > 0 {
+            let _ = state
+                .ctx
+                .clear_kv_cache_seq(Some(0), Some(n_prompt as u32), None);
         }
 
         // ── Stats ──────────────────────────────────────────────────────────────
         let t_total = t_start.elapsed();
         let ttft = t_first_token.unwrap_or(t_total);
         let gen_secs = (t_total - ttft).as_secs_f64();
-        let tps = if gen_secs > 0.0 { n_new as f64 / gen_secs } else { 0.0 };
+        let tps = if gen_secs > 0.0 {
+            n_new as f64 / gen_secs
+        } else {
+            0.0
+        };
         tracing::info!(
             n_prompt,
+            n_common,
+            n_new_prompt,
             n_new,
-            ttft_ms = ttft.as_millis(),
-            tps = format_args!("{tps:.1}"),
-            e2e_ms = t_total.as_millis(),
+            // Phase timings (ms since t_start, cumulative)
+            msg_ms        = t_after_msg.as_millis(),
+            serialize_ms  = t_after_serialize.as_millis(),
+            get_tmpl_ms   = t_after_get_template.as_millis(),
+            apply_tmpl_ms = t_after_apply_template.as_millis(),
+            tokenize_ms   = t_after_tokenize.as_millis(),
+            lock_ms       = t_after_lock.as_millis(),
+            kv_clear_ms   = t_after_kv_clear.as_millis(),
+            batch_ms      = t_after_batch_build.as_millis(),
+            prompt_dec_ms = t_after_prompt_decode.as_millis(),
+            // Derived
+            ttft_ms       = ttft.as_millis(),
+            tps           = format_args!("{tps:.1}"),
+            e2e_ms        = t_total.as_millis(),
             "llama stats"
         );
         tracing::debug!(output = %output, "← llama response");
@@ -302,7 +429,8 @@ impl ConversationHandle for LlamaConversation {
                 }));
             }
             BackendResponse::Text(_) => {
-                self.messages.push(serde_json::json!({"role": "assistant", "content": output}));
+                self.messages
+                    .push(serde_json::json!({"role": "assistant", "content": output}));
             }
         }
         Ok(response)
@@ -368,10 +496,10 @@ fn parse_llama_output(text: &str) -> BackendResponse {
                         .to_string();
                     let arguments = match call.pointer("/function/arguments") {
                         Some(v) if v.is_object() => v.clone(),
-                        Some(v) if v.is_string() => serde_json::from_str(
-                            v.as_str().unwrap_or("{}"),
-                        )
-                        .unwrap_or(Value::Object(Default::default())),
+                        Some(v) if v.is_string() => {
+                            serde_json::from_str(v.as_str().unwrap_or("{}"))
+                                .unwrap_or(Value::Object(Default::default()))
+                        }
                         _ => Value::Object(Default::default()),
                     };
                     return BackendResponse::ToolCall { name, arguments };

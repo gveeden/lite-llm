@@ -29,6 +29,7 @@ impl ToolRegistry {
                     description,
                     parameters,
                     handler,
+                    response: Default::default(),
                     enabled: true,
                 })
             })
@@ -41,10 +42,15 @@ impl ToolRegistry {
     }
 
     pub fn all(&self) -> Vec<ToolDefinition> {
-        self.tools.read().unwrap().clone()
+        let mut tools = vec![crate::tools::datetime_tool()];
+        tools.extend(self.tools.read().unwrap().clone());
+        tools
     }
 
     pub fn get(&self, name: &str) -> Option<ToolDefinition> {
+        if name == "get_datetime" {
+            return Some(crate::tools::datetime_tool());
+        }
         self.tools
             .read()
             .unwrap()
@@ -54,13 +60,19 @@ impl ToolRegistry {
     }
 
     pub fn by_names(&self, names: &[String]) -> Vec<ToolDefinition> {
-        self.tools
-            .read()
-            .unwrap()
-            .iter()
-            .filter(|t| names.contains(&t.name))
-            .cloned()
-            .collect()
+        let mut tools: Vec<ToolDefinition> = Vec::new();
+        if names.contains(&"get_datetime".to_string()) {
+            tools.push(crate::tools::datetime_tool());
+        }
+        tools.extend(
+            self.tools
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|t| names.contains(&t.name))
+                .cloned(),
+        );
+        tools
     }
 
     pub async fn insert(&self, tool: ToolDefinition) -> anyhow::Result<()> {

@@ -15,6 +15,7 @@ pub async fn execute(
         ToolHandler::Mqtt { broker, command_topic, payload, response_topic, timeout_ms } => {
             execute_mqtt(broker, command_topic, payload, response_topic.as_deref(), *timeout_ms, args).await
         }
+        ToolHandler::Builtin { name } => execute_builtin(name),
     }
 }
 
@@ -114,6 +115,21 @@ async fn execute_mqtt(
         Ok(Ok(s)) => Ok(s),
         Ok(Err(e)) => Err(e),
         Err(_) => anyhow::bail!("MQTT response timed out after {timeout_ms}ms"),
+    }
+}
+
+fn execute_builtin(name: &str) -> anyhow::Result<String> {
+    match name {
+        "datetime" => {
+            let now = chrono::Local::now();
+            Ok(format!(
+                "{}, {} {}",
+                now.format("%A, %B %-d, %Y"),
+                now.format("%H:%M"),
+                now.format("%Z"),
+            ))
+        }
+        _ => anyhow::bail!("Unknown builtin tool: {name}"),
     }
 }
 
