@@ -7,6 +7,8 @@ pub struct Config {
     pub model: Option<ModelConfig>,
     #[serde(default)]
     pub db: DbConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +41,18 @@ impl Default for DbConfig {
         Self {
             path: "~/.local/share/lite-llm/lite-llm.db".into(),
         }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MemoryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self { enabled: false }
     }
 }
 

@@ -42,9 +42,10 @@ pub async fn chat(
 
     let (tx, rx) = mpsc::unbounded_channel::<SessionEvent>();
     let http = state.http.clone();
+    let memory = state.memory.clone();
 
     tokio::spawn(async move {
-        let _ = session::run(engine, history, &user_text, tools, http, tx).await;
+        let _ = session::run(engine, history, &user_text, tools, http, memory, tx).await;
     });
 
     let stream = UnboundedReceiverStream::new(rx).map(|event| {

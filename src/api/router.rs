@@ -4,6 +4,7 @@ use axum::routing::{get, post, delete};
 use sqlx::SqlitePool;
 
 use crate::engine::model_manager::ModelManager;
+use crate::memory::MemoryStore;
 use crate::tools::registry::ToolRegistry;
 
 #[derive(Clone)]
@@ -12,6 +13,7 @@ pub struct AppState {
     pub models: Arc<ModelManager>,
     pub tools: Arc<ToolRegistry>,
     pub http: Arc<reqwest::Client>,
+    pub memory: Option<Arc<MemoryStore>>,
 }
 
 pub fn build(state: AppState) -> Router {
@@ -26,5 +28,7 @@ pub fn build(state: AppState) -> Router {
         .route("/tools/{name}", delete(super::tools::delete_tool))
         .route("/sessions", get(super::sessions::list_sessions))
         .route("/sessions/{id}/messages", get(super::sessions::get_messages))
+        .route("/remember", post(super::remember::remember))
+        .route("/memories", get(super::remember::list_memories))
         .with_state(state)
 }

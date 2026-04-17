@@ -4,10 +4,11 @@ use crate::tools::ToolDefinition;
 pub struct ToolRegistry {
     tools: std::sync::RwLock<Vec<ToolDefinition>>,
     db: SqlitePool,
+    memory_enabled: bool,
 }
 
 impl ToolRegistry {
-    pub async fn load(db: SqlitePool) -> anyhow::Result<Self> {
+    pub async fn load(db: SqlitePool, memory_enabled: bool) -> anyhow::Result<Self> {
         let rows = sqlx::query(
             "SELECT name, description, parameters, handler FROM tools WHERE enabled = 1",
         )
@@ -38,11 +39,15 @@ impl ToolRegistry {
         Ok(Self {
             tools: std::sync::RwLock::new(tools),
             db,
+            memory_enabled,
         })
     }
 
     pub fn all(&self) -> Vec<ToolDefinition> {
         let mut tools = vec![crate::tools::datetime_tool()];
+        if self.memory_enabled {
+            tools.push(crate::tools::remember_tool());
+        }
         tools.extend(self.tools.read().unwrap().clone());
         tools
     }
@@ -50,6 +55,9 @@ impl ToolRegistry {
     pub fn get(&self, name: &str) -> Option<ToolDefinition> {
         if name == "get_datetime" {
             return Some(crate::tools::datetime_tool());
+        }
+        if name == "remember" && self.memory_enabled {
+            return Some(crate::tools::remember_tool());
         }
         self.tools
             .read()
@@ -63,6 +71,9 @@ impl ToolRegistry {
         let mut tools: Vec<ToolDefinition> = Vec::new();
         if names.contains(&"get_datetime".to_string()) {
             tools.push(crate::tools::datetime_tool());
+        }
+        if self.memory_enabled && names.contains(&"remember".to_string()) {
+            tools.push(crate::tools::remember_tool());
         }
         tools.extend(
             self.tools

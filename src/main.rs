@@ -7,10 +7,12 @@ mod config;
 mod db;
 mod engine;
 mod ffi;
+mod memory;
 mod tools;
 
 use api::router::{AppState, build};
 use engine::model_manager::ModelManager;
+use memory::MemoryStore;
 use tools::registry::ToolRegistry;
 
 #[derive(Parser)]
@@ -18,6 +20,9 @@ use tools::registry::ToolRegistry;
 struct Cli {
     #[arg(short, long, default_value = "config.toml")]
     config: String,
+    /// Disable memory even if enabled in config.toml.
+    #[arg(long)]
+    no_memory: bool,
 }
 
 #[tokio::main]
@@ -36,8 +41,17 @@ async fn main() -> anyhow::Result<()> {
     let db = db::init(&cfg.db.path).await?;
     info!("Database ready at {}", cfg.db.path);
 
+    // Memory store (optional)
+    let memory_enabled = cfg.memory.enabled && !cli.no_memory;
+    let memory: Option<Arc<MemoryStore>> = if memory_enabled {
+        info!("Memory enabled");
+        Some(Arc::new(MemoryStore::new(db.clone())))
+    } else {
+        None
+    };
+
     // Tool registry
-    let tools = Arc::new(ToolRegistry::load(db.clone()).await?);
+    let tools = Arc::new(ToolRegistry::load(db.clone(), memory_enabled).await?);
     info!("Loaded {} tool(s)", tools.all().len());
 
     // Model manager
@@ -51,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
     // HTTP client for tool execution
     let http = Arc::new(reqwest::Client::new());
 
-    let state = AppState { db, models, tools, http };
+    let state = AppState { db, models, tools, http, memory };
     let router = build(state);
 
     let addr = format!("{}:{}", cfg.server.host, cfg.server.port);

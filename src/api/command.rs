@@ -36,10 +36,11 @@ pub async fn command(
 
     let (tx, rx) = mpsc::unbounded_channel::<SessionEvent>();
     let http = state.http.clone();
+    let memory = state.memory.clone();
     let text = req.text;
 
     tokio::spawn(async move {
-        let _ = session::run(engine, vec![], &text, tools, http, tx).await;
+        let _ = session::run(engine, vec![], &text, tools, http, memory, tx).await;
     });
 
     let stream = UnboundedReceiverStream::new(rx).map(|event| {

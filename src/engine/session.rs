@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::memory::MemoryStore;
 use crate::tools::{executor, ResponseMode, ToolDefinition};
 
 use super::{
@@ -14,17 +15,22 @@ use super::{
 /// into the system prompt, then drives the tool loop until the model produces
 /// a plain-text answer.  Text tokens are streamed over `tx` as they are
 /// generated; tool-call markup is suppressed from the stream.
+///
+/// If `memory` is `Some`, relevant memories are retrieved and appended to the
+/// system prompt before the conversation starts.
 pub async fn run(
     backend: Arc<dyn ModelBackend>,
     history: Vec<Message>,
     user_message: &str,
     tools: Vec<ToolDefinition>,
     http: Arc<reqwest::Client>,
+    memory: Option<Arc<MemoryStore>>,
     tx: UnboundedSender<SessionEvent>,
 ) -> anyhow::Result<()> {
     let t_e2e = std::time::Instant::now();
 
-    let mut conv = backend.new_conversation(Some(build_system_message()), &tools, &history)?;
+    let system = build_system_message(&memory, user_message).await;
+    let mut conv = backend.new_conversation(Some(&system), &tools, &history)?;
 
     let mut tool_executions: Vec<ToolExecution> = Vec::new();
     const MAX_TOOL_TURNS: usize = 10;
@@ -79,7 +85,7 @@ pub async fn run(
                     .find(|t| t.name == name)
                     .ok_or_else(|| anyhow::anyhow!("Model called unknown tool: {name}"))?;
 
-                let result = executor::execute(tool, &arguments, &http)
+                let result = executor::execute(tool, &arguments, &http, memory.as_ref())
                     .await
                     .unwrap_or_else(|e| format!("error: {e}"));
 
@@ -137,8 +143,26 @@ pub async fn run(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn build_system_message() -> &'static str {
-    "You are a helpful assistant. \
-     Use the get_datetime tool whenever the user asks for the current date or time. \
-     After every tool call, always reply to the user with a short text message summarising the result."
+async fn build_system_message(memory: &Option<Arc<MemoryStore>>, user_message: &str) -> String {
+    let base = "You are a helpful assistant. \
+                Use the get_datetime tool whenever the user asks for the current date or time. \
+                Use the remember tool to store facts the user tells you that are worth keeping \
+                for future conversations (e.g. device names, room layouts, preferences). \
+                After every tool call, always reply to the user with a short text message \
+                summarising the result.";
+
+    if let Some(store) = memory {
+        if let Ok(hits) = store.search(user_message, 5).await {
+            if !hits.is_empty() {
+                let mut msg = base.to_string();
+                msg.push_str("\n\n## Relevant context from memory:\n");
+                for hit in &hits {
+                    msg.push_str(&format!("- {hit}\n"));
+                }
+                return msg;
+            }
+        }
+    }
+
+    base.to_string()
 }
