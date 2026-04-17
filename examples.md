@@ -214,6 +214,78 @@ curl -s -N -X POST http://localhost:8080/command \
 
 ---
 
+## Memory
+
+Memory must be enabled in `config.toml` before these endpoints are available:
+
+```toml
+[memory]
+enabled = true
+```
+
+Or pass `--no-memory` at startup to disable it regardless of config.
+
+### Teach it about your home
+
+```bash
+curl -s -X POST http://localhost:8080/remember \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "The living room has a smart light called '\''Main'\''"}'
+
+curl -s -X POST http://localhost:8080/remember \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "The bedroom has a smart light called '\''Bedside'\''"}'
+
+curl -s -X POST http://localhost:8080/remember \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "The kitchen has a smart light called '\''Kitchen Ceiling'\''"}'
+```
+
+Response:
+```json
+{"result": "stored"}
+```
+
+Submitting a duplicate or near-duplicate fact returns `"already known"` instead.
+
+### Ask something that requires multiple tool calls
+
+With the memories above, "turn off all the lights" will retrieve all three room facts and the model will call `control_light` once per room:
+
+```bash
+curl -s -N -X POST http://localhost:8080/command \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "Turn off all the lights"}'
+```
+
+### List stored memories
+
+```bash
+curl -s http://localhost:8080/memories | jq
+```
+
+```json
+[
+  {"content": "The kitchen has a smart light called 'Kitchen Ceiling'"},
+  {"content": "The bedroom has a smart light called 'Bedside'"},
+  {"content": "The living room has a smart light called 'Main'"}
+]
+```
+
+### The model stores memories autonomously
+
+When memory is enabled, the model has access to the `remember` tool and will call it during a conversation when it decides something is worth storing. For example:
+
+```bash
+curl -s -N -X POST http://localhost:8080/command \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "By the way, the hallway also has a light called Hallway Lamp"}'
+```
+
+The model will call `remember` with the fact, then confirm to you that it has been saved.
+
+---
+
 ## Sessions
 
 ```bash
