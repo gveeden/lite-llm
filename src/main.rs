@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
     let models = Arc::new(ModelManager::new());
     if let Some(model_cfg) = &cfg.model {
         info!("Loading model from {}...", model_cfg.path);
-        models.load("default".into(), &model_cfg.path)?;
+        models.load("default".into(), model_cfg)?;
         info!("Model ready");
     }
 

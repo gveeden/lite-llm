@@ -29,14 +29,17 @@ impl ModelManager {
     /// Backend is chosen by the resolved file's extension:
     ///   `.gguf`  → llama.cpp (Vulkan-accelerated when available)
     ///   anything else → LiteRT-LM
-    pub fn load(&self, model_id: String, path: &str) -> anyhow::Result<()> {
-        let local_path = resolve_path(path)?;
+    pub fn load(&self, model_id: String, cfg: &crate::config::ModelConfig) -> anyhow::Result<()> {
+        let local_path = resolve_path(&cfg.path)?;
 
         let backend: Arc<dyn ModelBackend> = if local_path.ends_with(".gguf") {
-            Arc::new(LlamaModelBackend::load(&local_path)?)
+            Arc::new(LlamaModelBackend::load(&local_path, cfg)?)
         } else {
-            let engine = Engine::new(&local_path)?;
-            Arc::new(LiteRtBackend(Arc::new(engine)))
+            let engine = Engine::new(&local_path, cfg)?;
+            Arc::new(LiteRtBackend {
+                engine: Arc::new(engine),
+                config: cfg.clone(),
+            })
         };
 
         self.models.write().unwrap().insert(model_id.clone(), backend);

@@ -29,6 +29,53 @@ impl Default for ServerConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct ModelConfig {
     pub path: String,
+    #[serde(default = "default_context_size")]
+    pub context_size: u32,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_top_p")]
+    pub top_p: f32,
+    #[serde(default = "default_top_k")]
+    pub top_k: i32,
+    #[serde(default = "default_gpu_layers")]
+    pub gpu_layers: u32,
+    /// KV cache quantization (e.g., "f16", "q8_0", "q4_0").
+    #[serde(default)]
+    pub kv_quant: Option<String>,
+}
+
+impl ModelConfig {
+    pub fn from_path(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            context_size: default_context_size(),
+            temperature: default_temperature(),
+            top_p: default_top_p(),
+            top_k: default_top_k(),
+            gpu_layers: default_gpu_layers(),
+            kv_quant: None,
+        }
+    }
+}
+
+fn default_context_size() -> u32 {
+    8192
+}
+
+fn default_temperature() -> f32 {
+    0.8
+}
+
+fn default_top_p() -> f32 {
+    0.95
+}
+
+fn default_top_k() -> i32 {
+    40
+}
+
+fn default_gpu_layers() -> u32 {
+    99
 }
 
 #[derive(Debug, Deserialize)]

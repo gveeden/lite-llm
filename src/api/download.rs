@@ -166,7 +166,8 @@ async fn load_and_report(
     });
 
     let path_str = path.to_string_lossy().into_owned();
-    state.models.load(model_id.clone(), &path_str)?;
+    let cfg = crate::config::ModelConfig::from_path(&path_str);
+    state.models.load(model_id.clone(), &cfg)?;
 
     let _ = tx.send(DownloadEvent::Complete {
         model_id,

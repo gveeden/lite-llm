@@ -60,18 +60,22 @@ impl MemoryStore {
     }
 }
 
-/// Strip characters that are syntactically meaningful to FTS5 so that an
-/// arbitrary user/model string can be passed as a query without errors.
+/// Build an FTS5 OR query from an arbitrary string.
+///
+/// Strips FTS5 syntax characters, discards tokens shorter than 3 characters
+/// (prepositions, articles, etc. that don't add signal), then joins the
+/// remaining tokens with OR so that any memory matching *any* word in the
+/// user's message is returned.  Combined with the porter tokenizer this means
+/// "Turn on all the lights" retrieves memories containing "light" or "room"
+/// or "living", etc.
 fn sanitise_fts_query(input: &str) -> String {
-    // Keep alphanumeric characters and spaces; everything else becomes a space.
-    let cleaned: String = input
-        .chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' { c } else { ' ' })
+    let terms: Vec<String> = input
+        .split_whitespace()
+        .filter_map(|w| {
+            let clean: String = w.chars().filter(|c| c.is_alphanumeric()).collect();
+            if clean.len() >= 3 { Some(clean) } else { None }
+        })
         .collect();
 
-    // Collapse runs of spaces and trim.
-    cleaned
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    terms.join(" OR ")
 }
