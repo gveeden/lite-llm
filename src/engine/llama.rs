@@ -325,6 +325,7 @@ impl ConversationHandle for LlamaConversation {
                 LlamaSampler::top_k(self.config.top_k),
                 LlamaSampler::top_p(self.config.top_p, 1),
                 LlamaSampler::temp(self.config.temperature),
+                LlamaSampler::dist(self.config.top_k as u32), // Add distribution sampler
             ],
             false,
         );
