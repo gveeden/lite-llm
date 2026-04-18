@@ -9,7 +9,7 @@ temperature = 0.8
 top_p = 0.95
 top_k = 40
 gpu_layers = 99
-# kv_quant = "f16" # Options: f16, q8_0, q4_0 (LiteRT only for now)
+# kv_quant = "f16" # Options: f16, q8_0, q4_0, q4_k
 
 [db]
 path = "~/.local/share/lite-llm/lite-llm.db"

@@ -119,6 +119,28 @@ curl -s -N -X POST http://localhost:8080/command \
 
 ---
 
+## Running with Docker / Podman
+
+A Dockerfile is provided that includes all native dependencies and Vulkan acceleration support.
+
+```bash
+# Build the image
+podman build -t lite-llm .
+
+# Run with a volume for the database and config
+# The :Z suffix is for SELinux (Fedora/RHEL), remove if not needed.
+podman run -d \
+  -p 8080:8080 \
+  -v ./config.toml:/app/config.toml:Z \
+  -v ~/.local/share/lite-llm:/app/data:Z \
+  --name lite-llm \
+  lite-llm
+```
+
+The server listens on `0.0.0.0:8080` by default when running in the container.
+
+---
+
 ## Configuration
 
 `config.toml`:
@@ -129,9 +151,19 @@ port = 8080
 host = "127.0.0.1"
 
 [model]
-# Optional: load this model at startup
-repo_id = "litert-community/gemma-4-E2B-it-litert-lm"
-model_id = "gemma-4-E2B-it"
+# Path to a local .gguf or .task file, or a HuggingFace repo ID
+path = "unsloth/gemma-4-E2B-it-GGUF"
+
+# LLM Parameters
+context_size = 8192
+temperature = 0.8
+top_p = 0.95
+top_k = 40
+gpu_layers = 99      # Number of layers to offload to GPU (llama.cpp only)
+
+# KV Cache Quantization
+# Reduces memory usage for long contexts. Options: f16, q8_0, q4_0, q4_k
+# kv_quant = "q8_0"
 
 [db]
 path = "~/.local/share/lite-llm/lite-llm.db"

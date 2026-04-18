@@ -72,10 +72,31 @@ impl LlamaModelBackend {
         // n_batch = n_ctx so the full prompt always fits in a single decode call.
         // 1 = LLAMA_FLASH_ATTN_TYPE_ENABLED  (matches --flash-attn on)
         let n_ctx = cfg.context_size;
-        let ctx_params = LlamaContextParams::default()
+        let mut ctx_params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(n_ctx))
             .with_n_batch(n_ctx)
             .with_flash_attention_policy(1);
+
+        // Configure KV cache quantization if requested.
+        if let Some(kv_quant) = &cfg.kv_quant {
+            use llama_cpp_2::context::params::KvCacheType;
+            match kv_quant.to_lowercase().as_str() {
+                "f16" => {} // Default
+                "q8_0" => {
+                    ctx_params = ctx_params.with_type_k(KvCacheType::Q8_0);
+                    ctx_params = ctx_params.with_type_v(KvCacheType::Q8_0);
+                }
+                "q4_0" => {
+                    ctx_params = ctx_params.with_type_k(KvCacheType::Q4_0);
+                    ctx_params = ctx_params.with_type_v(KvCacheType::Q4_0);
+                }
+                "q4_k" => {
+                    ctx_params = ctx_params.with_type_k(KvCacheType::Q4_K);
+                    ctx_params = ctx_params.with_type_v(KvCacheType::Q4_K);
+                }
+                other => tracing::warn!("Unsupported KV quant type: {other}. Falling back to default."),
+            }
+        }
 
         let context = model
             .new_context(backend, ctx_params)
