@@ -84,6 +84,7 @@ See [examples.md](examples.md) for full curl examples covering:
 - Registering HTTP and MQTT tools
 - `/chat` — streaming chat with optional tool use
 - `/command` — full NL → tool execution → answer loop
+- Memory — teaching the model facts it will recall automatically
 - Session history
 
 ### Quick example
@@ -134,6 +135,11 @@ model_id = "gemma-4-E2B-it"
 
 [db]
 path = "~/.local/share/lite-llm/lite-llm.db"
+
+[memory]
+# Enable RAG memory so the model can remember facts across conversations.
+# Off by default. Pass --no-memory at startup to override back to disabled.
+enabled = true
 ```
 
 For gated HuggingFace models set `HF_TOKEN` before starting:
@@ -141,3 +147,12 @@ For gated HuggingFace models set `HF_TOKEN` before starting:
 ```bash
 HF_TOKEN=hf_xxx ./lite-llm
 ```
+
+### Memory
+
+When `[memory] enabled = true`, two things happen:
+
+1. **Retrieval** — before each request, relevant memories are fetched via full-text search and injected into the system prompt so the model can act on them.
+2. **Storage** — the model has access to a `remember` tool it can call autonomously to persist facts worth keeping. You can also store facts directly via `POST /remember`.
+
+Typical use: teach it about your home once, then "turn off all the lights" will call your smart home tool once per room without you having to enumerate them every time.

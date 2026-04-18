@@ -8,7 +8,10 @@ use super::{BackendResponse, ConversationHandle, IncomingMessage, Message, Model
 
 // ── Backend ───────────────────────────────────────────────────────────────────
 
-pub struct LiteRtBackend(pub Arc<Engine>);
+pub struct LiteRtBackend {
+    pub engine: Arc<Engine>,
+    pub config: crate::config::ModelConfig,
+}
 
 impl ModelBackend for LiteRtBackend {
     fn new_conversation(
@@ -24,12 +27,13 @@ impl ModelBackend for LiteRtBackend {
         let messages_json = build_messages_json(history)?;
 
         let conv = Conversation::new(
-            &self.0,
+            &self.engine,
             sys_json.as_deref(),
             tools_json.as_deref(),
             messages_json.as_deref(),
             // Constrained decoding requires libGemmaModelConstraintProvider.so — disabled.
             false,
+            &self.config,
         )?;
 
         Ok(Box::new(LiteRtConversation(conv)))

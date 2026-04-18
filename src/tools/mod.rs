@@ -97,6 +97,35 @@ pub fn datetime_tool() -> ToolDefinition {
     }
 }
 
+/// The memory tool — injected when memory is enabled.
+/// The model calls this to persist facts worth remembering.
+pub fn remember_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "remember".to_string(),
+        description: "Store a fact for future reference. Call this when the user tells you \
+                       something worth remembering (e.g. which lights are in a room, \
+                       preferences, device names). The fact will be recalled automatically \
+                       in future conversations.".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "The fact to store, written as a self-contained sentence."
+                }
+            },
+            "required": ["content"]
+        }),
+        handler: ToolHandler::Builtin { name: "remember".to_string() },
+        response: ResponsePolicy {
+            // Model continues after storing — it gives its text answer next.
+            on_success: ResponseMode::Llm,
+            on_error: ResponseMode::Llm,
+        },
+        enabled: true,
+    }
+}
+
 fn default_timeout_ms() -> u64 {
     3000
 }

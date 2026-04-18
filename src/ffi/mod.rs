@@ -24,7 +24,7 @@ unsafe impl Send for Engine {}
 unsafe impl Sync for Engine {}
 
 impl Engine {
-    pub fn new(model_path: &str) -> anyhow::Result<Self> {
+    pub fn new(model_path: &str, cfg: &crate::config::ModelConfig) -> anyhow::Result<Self> {
         let path = CString::new(model_path)?;
         let backend = CString::new("cpu")?;
 
@@ -39,6 +39,8 @@ impl Engine {
                 !settings.is_null(),
                 "litert_lm_engine_settings_create failed"
             );
+
+            litert_lm_engine_settings_set_max_num_tokens(settings, cfg.context_size as i32);
 
             let engine = litert_lm_engine_create(settings);
             if engine.is_null() {
@@ -85,6 +87,7 @@ impl Conversation {
         tools_json: Option<&str>,
         messages_json: Option<&str>,
         constrained_decoding: bool,
+        cfg: &crate::config::ModelConfig,
     ) -> anyhow::Result<Self> {
         let sys_c = system_message_json.map(CString::new).transpose()?;
         let tools_c = tools_json.map(CString::new).transpose()?;
@@ -95,14 +98,30 @@ impl Conversation {
         let msgs_ptr = msgs_c.as_deref().map_or(std::ptr::null(), |s| s.as_ptr());
 
         unsafe {
+            let session_cfg = litert_lm_session_config_create();
+            if !session_cfg.is_null() {
+                let sampler_params = LiteRtLmSamplerParams {
+                    type_: Type_kTopP, // Default to top-p which usually includes top-k/temp logic in LiteRT
+                    top_k: cfg.top_k,
+                    top_p: cfg.top_p,
+                    temperature: cfg.temperature,
+                    seed: 0,
+                };
+                litert_lm_session_config_set_sampler_params(session_cfg, &sampler_params);
+            }
+
             let config = litert_lm_conversation_config_create(
                 engine.raw,
-                std::ptr::null_mut(), // use default session config
+                session_cfg,
                 sys_ptr,
                 tools_ptr,
                 msgs_ptr,
                 constrained_decoding,
             );
+
+            if !session_cfg.is_null() {
+                litert_lm_session_config_delete(session_cfg);
+            }
             anyhow::ensure!(
                 !config.is_null(),
                 "litert_lm_conversation_config_create failed"

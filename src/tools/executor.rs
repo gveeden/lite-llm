@@ -1,5 +1,7 @@
+use crate::memory::MemoryStore;
 use crate::tools::{ToolDefinition, ToolHandler, substitute};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Execute a tool call with the given arguments.
 /// Returns the result as a plain string to feed back to the model.
@@ -7,6 +9,7 @@ pub async fn execute(
     tool: &ToolDefinition,
     args: &serde_json::Value,
     http: &reqwest::Client,
+    memory: Option<&Arc<MemoryStore>>,
 ) -> anyhow::Result<String> {
     match &tool.handler {
         ToolHandler::Http { method, url, headers, body } => {
@@ -15,7 +18,7 @@ pub async fn execute(
         ToolHandler::Mqtt { broker, command_topic, payload, response_topic, timeout_ms } => {
             execute_mqtt(broker, command_topic, payload, response_topic.as_deref(), *timeout_ms, args).await
         }
-        ToolHandler::Builtin { name } => execute_builtin(name),
+        ToolHandler::Builtin { name } => execute_builtin(name, args, memory).await,
     }
 }
 
@@ -118,7 +121,11 @@ async fn execute_mqtt(
     }
 }
 
-fn execute_builtin(name: &str) -> anyhow::Result<String> {
+async fn execute_builtin(
+    name: &str,
+    args: &serde_json::Value,
+    memory: Option<&Arc<MemoryStore>>,
+) -> anyhow::Result<String> {
     match name {
         "datetime" => {
             let now = chrono::Local::now();
@@ -128,6 +135,16 @@ fn execute_builtin(name: &str) -> anyhow::Result<String> {
                 now.format("%H:%M"),
                 now.format("%Z"),
             ))
+        }
+        "remember" => {
+            let content = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("remember: missing 'content' argument"))?;
+            match memory {
+                Some(store) => Ok(store.insert(content).await?.to_string()),
+                None => anyhow::bail!("memory is disabled"),
+            }
         }
         _ => anyhow::bail!("Unknown builtin tool: {name}"),
     }

@@ -50,19 +50,15 @@ pub struct LlamaModelBackend {
     // slots: context creation (KV-cache allocation) is expensive and should not
     // happen per-request.
     pool: Arc<ContextPool>,
+    config: crate::config::ModelConfig,
 }
 
 impl LlamaModelBackend {
-    pub fn load(path: &str) -> anyhow::Result<Self> {
+    pub fn load(path: &str, cfg: &crate::config::ModelConfig) -> anyhow::Result<Self> {
         let backend = get_or_init_backend()?;
 
         // Number of transformer layers to offload to GPU/Vulkan.
-        // 99 = try to offload everything; llama.cpp falls back to CPU gracefully
-        // when no Vulkan device is available.  Set LLAMA_GPU_LAYERS=0 to force CPU.
-        let n_gpu: u32 = std::env::var("LLAMA_GPU_LAYERS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(99);
+        let n_gpu = cfg.gpu_layers;
 
         let model_params = LlamaModelParams::default().with_n_gpu_layers(n_gpu);
         let model = LlamaModel::load_from_file(backend, path, &model_params)
@@ -75,11 +71,12 @@ impl LlamaModelBackend {
         // Create the inference context once here.
         // n_batch = n_ctx so the full prompt always fits in a single decode call.
         // 1 = LLAMA_FLASH_ATTN_TYPE_ENABLED  (matches --flash-attn on)
-        let n_ctx = 8192u32;
+        let n_ctx = cfg.context_size;
         let ctx_params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(n_ctx))
             .with_n_batch(n_ctx)
             .with_flash_attention_policy(1);
+
         let context = model
             .new_context(backend, ctx_params)
             .map_err(|e| anyhow::anyhow!("new_context: {e}"))?;
@@ -91,6 +88,7 @@ impl LlamaModelBackend {
                 ctx: context,
                 cached_tokens: Vec::new(),
             }))),
+            config: cfg.clone(),
         })
     }
 }
@@ -123,6 +121,7 @@ impl ModelBackend for LlamaModelBackend {
             pool: Arc::clone(&self.pool),
             messages,
             tools_json,
+            config: self.config.clone(),
         }))
     }
 }
@@ -140,6 +139,7 @@ struct LlamaConversation {
     messages: Vec<Value>,
     /// OpenAI-format tools JSON array, if tools are active.
     tools_json: Option<String>,
+    config: crate::config::ModelConfig,
 }
 
 impl ConversationHandle for LlamaConversation {
@@ -299,7 +299,14 @@ impl ConversationHandle for LlamaConversation {
         state.cached_tokens = tokens.clone();
 
         // 6. Autoregressive token sampling.
-        let mut sampler = LlamaSampler::chain([LlamaSampler::greedy()], false);
+        let mut sampler = LlamaSampler::chain(
+            [
+                LlamaSampler::top_k(self.config.top_k),
+                LlamaSampler::top_p(self.config.top_p, 1),
+                LlamaSampler::temp(self.config.temperature),
+            ],
+            false,
+        );
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut output = String::new();
         let mut n_new: usize = 0;
